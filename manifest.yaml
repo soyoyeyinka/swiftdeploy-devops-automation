@@ -23,3 +23,13 @@ network:
 logs:
   volume_name: swiftdeploy-logs
 
+
+policy:
+  opa_url: http://localhost:8181
+  infrastructure:
+    min_disk_free_gb: 10
+    max_cpu_load: 2.0
+  canary:
+    max_error_rate: 0.01
+    max_p99_latency_seconds: 0.5
+    window_seconds: 30

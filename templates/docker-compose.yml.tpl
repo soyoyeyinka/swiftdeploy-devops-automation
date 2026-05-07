@@ -42,6 +42,26 @@ services:
     security_opt:
       - no-new-privileges:true
 
+  opa:
+    image: openpolicyagent/opa:latest
+    container_name: swiftdeploy-opa
+    restart: __RESTART_POLICY__
+    command:
+      - run
+      - --server
+      - --addr=0.0.0.0:8181
+      - /policies
+    ports:
+      - "127.0.0.1:8181:8181"
+    volumes:
+      - ../policies:/policies:ro
+    networks:
+      - swiftdeploy-network
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+
 networks:
   swiftdeploy-network:
     name: __NETWORK_NAME__
