@@ -1,0 +1,437 @@
+#!/usr/bin/env python
+import argparse
+import os
+import re
+import socket
+import subprocess
+import sys
+import time
+import urllib.request
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parent
+MANIFEST = ROOT / "manifest.yaml"
+TEMPLATES = ROOT / "templates"
+GENERATED = ROOT / "generated"
+COMPOSE_FILE = GENERATED / "docker-compose.yml"
+NGINX_FILE = GENERATED / "nginx.conf"
+
+
+def parse_scalar(value):
+    value = value.strip()
+
+    if value == "":
+        return ""
+
+    if (value.startswith('"') and value.endswith('"')) or (
+        value.startswith("'") and value.endswith("'")
+    ):
+        return value[1:-1]
+
+    lowered = value.lower()
+
+    if lowered == "true":
+        return True
+
+    if lowered == "false":
+        return False
+
+    try:
+        return int(value)
+    except ValueError:
+        pass
+
+    try:
+        return float(value)
+    except ValueError:
+        pass
+
+    return value
+
+
+def load_manifest():
+    if not MANIFEST.exists():
+        raise FileNotFoundError("manifest.yaml was not found")
+
+    root = {}
+    stack = [(-1, root)]
+
+    for raw_line in MANIFEST.read_text(encoding="utf-8").splitlines():
+        if not raw_line.strip() or raw_line.lstrip().startswith("#"):
+            continue
+
+        indent = len(raw_line) - len(raw_line.lstrip(" "))
+        line = raw_line.strip()
+
+        if ":" not in line:
+            raise ValueError(f"Invalid manifest line: {raw_line}")
+
+        key, value = line.split(":", 1)
+        key = key.strip()
+        value = value.strip()
+
+        while stack and indent <= stack[-1][0]:
+            stack.pop()
+
+        parent = stack[-1][1]
+
+        if value == "":
+            new_map = {}
+            parent[key] = new_map
+            stack.append((indent, new_map))
+        else:
+            parent[key] = parse_scalar(value)
+
+    return root
+
+
+def required(manifest, path):
+    current = manifest
+
+    for part in path.split("."):
+        if not isinstance(current, dict) or part not in current:
+            raise KeyError(f"Missing required manifest key: {path}")
+        current = current[part]
+
+    return current
+
+
+def replacement_map(manifest):
+    return {
+        "__SERVICE_NAME__": str(required(manifest, "services.name")),
+        "__SERVICE_IMAGE__": str(required(manifest, "services.image")),
+        "__APP_PORT__": str(required(manifest, "services.port")),
+        "__MODE__": str(required(manifest, "services.mode")),
+        "__APP_VERSION__": str(required(manifest, "services.app_version")),
+        "__RESTART_POLICY__": str(required(manifest, "services.restart_policy")),
+        "__NGINX_IMAGE__": str(required(manifest, "nginx.image")),
+        "__NGINX_PORT__": str(required(manifest, "nginx.port")),
+        "__PROXY_TIMEOUT__": str(required(manifest, "nginx.proxy_timeout")),
+        "__NETWORK_NAME__": str(required(manifest, "network.name")),
+        "__NETWORK_DRIVER__": str(required(manifest, "network.driver_type")),
+        "__LOG_VOLUME__": str(required(manifest, "logs.volume_name")),
+        "__CONTACT__": str(required(manifest, "project.contact")),
+    }
+
+
+def render_template(template_path, output_path, mapping):
+    content = template_path.read_text(encoding="utf-8")
+
+    for key, value in mapping.items():
+        content = content.replace(key, value)
+
+    output_path.write_text(content, encoding="utf-8")
+
+
+def run(command, capture=False, check=True):
+    result = subprocess.run(
+        command,
+        cwd=ROOT,
+        text=True,
+        stdout=subprocess.PIPE if capture else None,
+        stderr=subprocess.PIPE if capture else None,
+    )
+
+    if check and result.returncode != 0:
+        if capture:
+            print(result.stdout)
+            print(result.stderr)
+        raise RuntimeError(f"Command failed: {' '.join(command)}")
+
+    return result
+
+
+def compose_command():
+    return ["docker", "compose", "-f", str(COMPOSE_FILE)]
+
+
+def command_init(args=None):
+    manifest = load_manifest()
+    mapping = replacement_map(manifest)
+
+    GENERATED.mkdir(exist_ok=True)
+
+    render_template(
+        TEMPLATES / "docker-compose.yml.tpl",
+        COMPOSE_FILE,
+        mapping
+    )
+
+    render_template(
+        TEMPLATES / "nginx.conf.tpl",
+        NGINX_FILE,
+        mapping
+    )
+
+    print("[OK] Generated deployment files:")
+    print(f" - {COMPOSE_FILE}")
+    print(f" - {NGINX_FILE}")
+    print(f"[INFO] Mode: {required(manifest, 'services.mode')}")
+    print(f"[INFO] Nginx public port: {required(manifest, 'nginx.port')}")
+
+
+def check_port_available(port):
+    sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+
+    try:
+        sock.bind(("127.0.0.1", int(port)))
+        sock.close()
+        return True
+    except OSError:
+        sock.close()
+        return False
+
+
+def docker_container_exists(name):
+    result = run(
+        ["docker", "ps", "-a", "--filter", f"name={name}", "--format", "{{.Names}}"],
+        capture=True,
+        check=False,
+    )
+
+    return name in result.stdout.splitlines()
+
+
+def pass_check(message):
+    print(f"[PASS] {message}")
+
+
+def fail_check(message):
+    print(f"[FAIL] {message}")
+    raise RuntimeError(message)
+
+
+def command_validate(args=None):
+    manifest = load_manifest()
+
+    required_keys = [
+        "project.name",
+        "project.version",
+        "project.contact",
+        "services.name",
+        "services.image",
+        "services.port",
+        "services.mode",
+        "services.app_version",
+        "services.restart_policy",
+        "nginx.image",
+        "nginx.port",
+        "nginx.proxy_timeout",
+        "network.name",
+        "network.driver_type",
+        "logs.volume_name",
+    ]
+
+    for key in required_keys:
+        required(manifest, key)
+
+    pass_check("manifest.yaml exists and required keys are present")
+
+    if not (TEMPLATES / "docker-compose.yml.tpl").exists():
+        fail_check("Docker Compose template is missing")
+
+    if not (TEMPLATES / "nginx.conf.tpl").exists():
+        fail_check("Nginx template is missing")
+
+    pass_check("required templates exist")
+
+    if not COMPOSE_FILE.exists() or not NGINX_FILE.exists():
+        fail_check("generated files are missing; run './swiftdeploy init' first")
+
+    pass_check("generated Docker Compose and Nginx files exist")
+
+    run(["docker", "version"], capture=True)
+    pass_check("Docker Engine is reachable")
+
+    run(["docker", "compose", "version"], capture=True)
+    pass_check("Docker Compose is available")
+
+    image_name = str(required(manifest, "services.image"))
+    run(["docker", "image", "inspect", image_name], capture=True)
+    pass_check(f"Docker image exists locally: {image_name}")
+
+    run(compose_command() + ["config"], capture=True)
+    pass_check("generated docker-compose.yml is valid")
+
+    nginx_conf = NGINX_FILE.read_text(encoding="utf-8")
+
+    if 'X-Deployed-By "swiftdeploy"' not in nginx_conf:
+        fail_check("Nginx config does not add X-Deployed-By header")
+
+    pass_check("Nginx adds X-Deployed-By header")
+
+    compose_text = COMPOSE_FILE.read_text(encoding="utf-8")
+    app_block = compose_text.split("  nginx:")[0]
+
+    if "\n    ports:" in app_block:
+        fail_check("app service must not publish a host port")
+
+    pass_check("app service is internal-only; no host port is published")
+
+    if "cap_drop:" not in compose_text or "no-new-privileges:true" not in compose_text:
+        fail_check("container security hardening is missing")
+
+    pass_check("containers drop Linux capabilities and use no-new-privileges")
+
+    nginx_port = int(required(manifest, "nginx.port"))
+
+    if check_port_available(nginx_port) or docker_container_exists("swiftdeploy-nginx"):
+        pass_check(f"Nginx port {nginx_port} is available or already used by this stack")
+    else:
+        fail_check(f"Nginx port {nginx_port} is already in use by another process")
+
+    print("[OK] Validation completed successfully")
+
+
+def http_get(url):
+    request = urllib.request.Request(url, method="GET")
+
+    try:
+        with urllib.request.urlopen(request, timeout=5) as response:
+            body = response.read().decode("utf-8", errors="replace")
+            return response.status, body, dict(response.headers)
+    except Exception:
+        return None, None, {}
+
+
+def wait_for_health(port, expected_mode=None):
+    url = f"http://localhost:{port}/healthz"
+
+    print(f"[INFO] Waiting for health check: {url}")
+
+    for _ in range(30):
+        status, body, headers = http_get(url)
+
+        if status == 200:
+            print("[OK] Service is healthy")
+            print(body)
+
+            if expected_mode == "canary":
+                status2, body2, headers2 = http_get(f"http://localhost:{port}/")
+                if headers2.get("X-Mode") == "canary":
+                    print("[OK] Canary response header detected: X-Mode=canary")
+                else:
+                    print("[WARN] Canary mode is running, but X-Mode header was not detected")
+
+            return True
+
+        time.sleep(2)
+
+    raise RuntimeError("Service did not become healthy in time")
+
+
+def command_deploy(args=None):
+    manifest = load_manifest()
+    nginx_port = int(required(manifest, "nginx.port"))
+
+    print("[INFO] Initialising generated files")
+    command_init()
+
+    print("[INFO] Running pre-flight validation")
+    command_validate()
+
+    print("[INFO] Starting stack with Docker Compose")
+    run(compose_command() + ["up", "-d"])
+
+    wait_for_health(nginx_port, required(manifest, "services.mode"))
+
+    print(f"[OK] Deployment complete: http://localhost:{nginx_port}")
+
+
+def update_manifest_mode(new_mode):
+    text = MANIFEST.read_text(encoding="utf-8").splitlines()
+    output = []
+    in_services = False
+    replaced = False
+
+    for line in text:
+        stripped = line.strip()
+
+        if line and not line.startswith(" "):
+            in_services = stripped == "services:"
+
+        if in_services and stripped.startswith("mode:"):
+            indent = line[: len(line) - len(line.lstrip(" "))]
+            output.append(f"{indent}mode: {new_mode}")
+            replaced = True
+        else:
+            output.append(line)
+
+    if not replaced:
+        raise RuntimeError("Could not find services.mode in manifest.yaml")
+
+    MANIFEST.write_text("\n".join(output) + "\n", encoding="utf-8")
+
+
+def command_promote(args):
+    if args.mode not in ["stable", "canary"]:
+        raise RuntimeError("Mode must be either 'stable' or 'canary'")
+
+    print(f"[INFO] Updating manifest mode to: {args.mode}")
+    update_manifest_mode(args.mode)
+
+    print("[INFO] Regenerating files from manifest")
+    command_init()
+
+    manifest = load_manifest()
+    nginx_port = int(required(manifest, "nginx.port"))
+
+    print("[INFO] Recreating app service only")
+    run(compose_command() + ["up", "-d", "--no-deps", "--force-recreate", "app"])
+
+    wait_for_health(nginx_port, args.mode)
+
+    print(f"[OK] Promotion complete. Current mode: {args.mode}")
+
+
+def command_teardown(args=None):
+    if not COMPOSE_FILE.exists():
+        print("[INFO] Generated compose file missing; regenerating first")
+        command_init()
+
+    print("[INFO] Tearing down stack and removing volumes")
+    run(compose_command() + ["down", "-v", "--remove-orphans"])
+
+    print("[OK] Containers, network, and named volumes removed")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        prog="swiftdeploy",
+        description="Manifest-driven Docker Compose and Nginx deployment automation tool"
+    )
+
+    subcommands = parser.add_subparsers(dest="command")
+
+    subcommands.add_parser("init", help="Generate Docker Compose and Nginx files")
+    subcommands.add_parser("validate", help="Run deployment pre-flight checks")
+    subcommands.add_parser("deploy", help="Deploy the stack")
+    subcommands.add_parser("teardown", help="Remove containers, network, and volumes")
+
+    promote = subcommands.add_parser("promote", help="Promote deployment mode")
+    promote.add_argument("mode", choices=["stable", "canary"])
+
+    args = parser.parse_args()
+
+    try:
+        if args.command == "init":
+            command_init(args)
+        elif args.command == "validate":
+            command_validate(args)
+        elif args.command == "deploy":
+            command_deploy(args)
+        elif args.command == "promote":
+            command_promote(args)
+        elif args.command == "teardown":
+            command_teardown(args)
+        else:
+            parser.print_help()
+            sys.exit(1)
+    except Exception as error:
+        print(f"[ERROR] {error}")
+        sys.exit(1)
+
+
+if __name__ == "__main__":
+    main()

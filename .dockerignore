@@ -1,0 +1,9 @@
+.git
+generated
+templates
+README.md
+manifest.yaml
+swiftdeploy
+__pycache__
+*.pyc
+.env
