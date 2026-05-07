@@ -1,21 +1,15 @@
-# SwiftDeploy
+# SwiftDeploy DevOps Automation
 
-SwiftDeploy is a manifest-driven DevOps automation tool that deploys a containerized Python API behind an Nginx reverse proxy using Docker Compose.
+SwiftDeploy is a manifest-driven DevOps automation tool that deploys a containerized Flask API behind an Nginx reverse proxy using Docker Compose.
 
-The project started as a deployment automation tool and was extended in Stage 4B with observability, policy enforcement, and auditing.
+The project was completed in two stages:
 
-SwiftDeploy now provides:
+- **Stage 4A:** Deployment automation, generated Docker Compose/Nginx files, stable/canary promotion, chaos testing, and teardown.
+- **Stage 4B:** Observability, Open Policy Agent policy enforcement, live status monitoring, and audit reporting.
 
-- Manifest-driven deployment
-- Automatic Docker Compose and Nginx configuration generation
-- Dockerized Flask API served with Gunicorn
-- Nginx reverse proxy
-- Prometheus-style metrics
-- Open Policy Agent policy enforcement
-- Stable and canary deployment modes
-- Controlled chaos testing
-- Live status dashboard
-- Audit history and Markdown audit report generation
+The main idea behind SwiftDeploy is simple:
+
+> SwiftDeploy does not deploy or promote blindly. It observes the environment, asks OPA for a policy decision, explains the result, and records evidence for auditing.
 
 ---
 
@@ -25,59 +19,90 @@ SwiftDeploy uses `manifest.yaml` as the single source of truth for deployment co
 
 Instead of manually editing deployment files, the CLI reads the manifest and generates:
 
-- `generated/docker-compose.yml`
-- `generated/nginx.conf`
+```text
+generated/docker-compose.yml
+generated/nginx.conf
+```
 
 The deployment stack contains:
 
-- A Flask/Gunicorn application container
-- An Nginx reverse proxy container
-- An Open Policy Agent sidecar container
+```text
+Flask/Gunicorn API container
+Nginx reverse proxy container
+Open Policy Agent sidecar container
+```
 
-The application container is not exposed directly to the host. Only Nginx is exposed publicly on port `8080`. OPA is reachable by the CLI on localhost port `8181`, but it is not exposed through the Nginx ingress.
+Only Nginx is exposed publicly on port `8080`. The Flask API runs internally on port `3000`, and OPA is bound to localhost on port `8181`.
 
 ---
 
 ## Architecture
 
-Request flow:
+### Application Traffic Flow
 
-Client or curl request -> Nginx reverse proxy on port 8080 -> internal Docker network -> Flask/Gunicorn API on port 3000
+```text
+Client / Browser / curl
+        |
+        v
+Nginx reverse proxy
+localhost:8080
+        |
+        v
+Internal Docker network
+        |
+        v
+Flask/Gunicorn API
+internal port 3000
+```
 
-Policy flow:
+### Policy Decision Flow
 
-SwiftDeploy CLI -> collects host stats or application metrics -> sends facts to OPA -> OPA returns structured decision -> CLI allows or blocks the action
-
-OPA is intentionally isolated from public traffic. It is not routed through Nginx.
+```text
+SwiftDeploy CLI
+        |
+        | collects host stats or app metrics
+        v
+Open Policy Agent
+localhost:8181
+        |
+        | returns allow/deny decision with reasons
+        v
+SwiftDeploy CLI
+        |
+        | deploys, promotes, or blocks the action
+        v
+Docker Compose stack
+```
 
 ---
 
-## Folder Structure
+## Repository Structure
 
+```text
 swiftdeploy/
-- app/
-  - app.py
-  - requirements.txt
-- generated/
-  - docker-compose.yml
-  - nginx.conf
-- policies/
-  - infrastructure.rego
-  - canary.rego
-- templates/
-  - docker-compose.yml.tpl
-  - nginx.conf.tpl
-- Dockerfile
-- README.md
-- BLOG_POST.md
-- manifest.yaml
-- swiftdeploy
-- history.jsonl
-- audit_report.md
+├── app/
+│   ├── app.py
+│   └── requirements.txt
+├── generated/
+│   ├── docker-compose.yml
+│   └── nginx.conf
+├── policies/
+│   ├── infrastructure.rego
+│   └── canary.rego
+├── templates/
+│   ├── docker-compose.yml.tpl
+│   └── nginx.conf.tpl
+├── Dockerfile
+├── README.md
+├── audit_report.md
+├── history.jsonl
+├── manifest.yaml
+└── swiftdeploy
+```
 
 ---
 
-## Main Technologies Used
+## Technologies Used
 
 - Python
 - Flask
@@ -86,375 +111,321 @@ swiftdeploy/
 - Docker Compose
 - Nginx
 - Open Policy Agent
-- Rego policy language
-- Prometheus text-format metrics
+- Rego
+- Prometheus-style metrics
 - Git and GitHub
 
 ---
 
-## Manifest-Driven Deployment
+# Stage 4A: Deployment Automation
 
-The `manifest.yaml` file controls the deployment.
+Stage 4A focused on building the core deployment engine.
 
-It includes:
+The tool can:
 
-- project details
-- service name
-- Docker image name
-- application port
-- deployment mode
-- application version
-- Nginx image and port
-- network settings
-- log volume settings
-- OPA URL
-- infrastructure policy thresholds
-- canary safety thresholds
-
-The deployment mode is controlled through:
-
-`services.mode`
-
-Supported modes:
-
-- `stable`
-- `canary`
-
-The key design decision is that deployment behaviour is controlled by configuration, not by manually editing Docker Compose files.
+- read `manifest.yaml`;
+- generate Docker Compose and Nginx files;
+- deploy a Flask/Gunicorn API with Docker Compose;
+- expose the app through Nginx;
+- keep the application container internal;
+- validate the generated deployment files;
+- promote between `stable` and `canary`;
+- inject controlled chaos in canary mode;
+- tear down the environment cleanly.
 
 ---
 
-## Application Endpoints
+## Stage 4A Commands
 
-### Root Endpoint
+Generate deployment files:
 
-`GET /`
+```bash
+./swiftdeploy init
+```
 
-Returns the application message, current mode, version, and timestamp.
+Validate the environment and generated files:
 
-Example response contains:
+```bash
+./swiftdeploy validate
+```
 
-- `message`
-- `mode`
-- `version`
-- `timestamp`
+Deploy the stack:
 
----
+```bash
+./swiftdeploy deploy
+```
 
-### Health Check Endpoint
+Promote to canary:
 
-`GET /healthz`
+```bash
+./swiftdeploy promote canary
+```
 
-Returns application health information.
+Promote back to stable:
 
-Example response contains:
+```bash
+./swiftdeploy promote stable
+```
 
-- `status`
-- `mode`
-- `version`
-- `uptime_seconds`
+Tear down the environment:
 
----
-
-### Metrics Endpoint
-
-`GET /metrics`
-
-Exposes Prometheus-compatible metrics.
-
-Tracked metrics include:
-
-- `http_requests_total`
-- `http_request_duration_seconds`
-- `app_uptime_seconds`
-- `app_mode`
-- `chaos_active`
-
-State values:
-
-- `app_mode 0` means stable
-- `app_mode 1` means canary
-- `chaos_active 0` means no chaos
-- `chaos_active 1` means slow chaos
-- `chaos_active 2` means error chaos
+```bash
+./swiftdeploy teardown
+```
 
 ---
 
-### Chaos Endpoint
+## Stage 4A Features
 
-`POST /chaos`
+### Manifest-Driven Deployment
 
-The chaos endpoint only works in canary mode.
+SwiftDeploy uses `manifest.yaml` to control deployment behaviour.
+
+Example values controlled by the manifest include:
+
+```yaml
+services:
+  image: swift-deploy-1-node:latest
+  port: 3000
+  mode: stable
+
+nginx:
+  port: 8080
+```
+
+This means the manifest controls deployment configuration, while generated files are created automatically.
+
+---
+
+### Generated Docker Compose File
+
+SwiftDeploy generates:
+
+```text
+generated/docker-compose.yml
+```
+
+The generated Compose file defines the application container, Nginx container, network, volumes, and later the OPA sidecar.
+
+---
+
+### Generated Nginx Configuration
+
+SwiftDeploy generates:
+
+```text
+generated/nginx.conf
+```
+
+Nginx forwards requests from port `8080` to the internal Flask/Gunicorn app service.
+
+The response header below confirms traffic is going through the generated Nginx reverse proxy:
+
+```text
+X-Deployed-By: swiftdeploy
+```
+
+---
+
+### Stable and Canary Modes
+
+The app supports two modes:
+
+```text
+stable
+canary
+```
+
+When the app is promoted to canary, responses include:
+
+```text
+X-Mode: canary
+```
+
+---
+
+### Chaos Testing
+
+The `/chaos` endpoint is active only in canary mode.
 
 Supported chaos modes:
 
-- `slow`
-- `error`
-- `recover`
+```text
+slow
+error
+recover
+```
 
 Slow chaos example:
 
-`curl -i -X POST http://localhost:8080/chaos -H "Content-Type: application/json" -d '{"mode":"slow","duration":2}'`
-
-Error chaos example:
-
-`curl -i -X POST http://localhost:8080/chaos -H "Content-Type: application/json" -d '{"mode":"error","rate":0.5}'`
+```bash
+curl -i -X POST http://localhost:8080/chaos \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"slow","duration":2}'
+```
 
 Recover from chaos:
 
-`curl -i -X POST http://localhost:8080/chaos -H "Content-Type: application/json" -d '{"mode":"recover"}'`
+```bash
+curl -i -X POST http://localhost:8080/chaos \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"recover"}'
+```
 
 ---
 
-## CLI Commands
+# Stage 4B: Observability, Policy Enforcement, and Auditing
 
-SwiftDeploy is controlled using the `swiftdeploy` CLI.
+Stage 4B extended SwiftDeploy with:
 
-Available commands:
+- Prometheus-style metrics;
+- Open Policy Agent policy enforcement;
+- infrastructure deployment gate;
+- canary promotion gate;
+- live status dashboard;
+- audit history;
+- Markdown audit report generation.
 
-- `./swiftdeploy init`
-- `./swiftdeploy validate`
-- `./swiftdeploy deploy`
-- `./swiftdeploy promote stable`
-- `./swiftdeploy promote canary`
-- `./swiftdeploy status`
-- `./swiftdeploy status --once`
-- `./swiftdeploy audit`
-- `./swiftdeploy teardown`
+Stage 4B gives SwiftDeploy:
 
-On Windows Git Bash, the script can also be run with Python:
-
-`python swiftdeploy <command>`
-
----
-
-## Build the Docker Image
-
-Before deployment, build the application image:
-
-`docker build -t swift-deploy-1-node:latest .`
-
-Confirm the image exists:
-
-`docker images | grep swift-deploy-1-node`
+```text
+Eyes   = /metrics endpoint
+Brain  = OPA policy engine
+Memory = history.jsonl and audit_report.md
+```
 
 ---
 
-## Generate Deployment Files
+## Observability
 
-Run:
+The Flask API exposes:
 
-`./swiftdeploy init`
+```text
+/metrics
+```
 
-This generates:
+The metrics are in Prometheus text format.
 
-- `generated/docker-compose.yml`
-- `generated/nginx.conf`
+Tracked metrics include:
 
-The files are generated from templates using values in `manifest.yaml`.
+```text
+http_requests_total
+http_request_duration_seconds
+app_uptime_seconds
+app_mode
+chaos_active
+```
 
----
+State values:
 
-## Validate the Deployment
+```text
+app_mode 0      = stable
+app_mode 1      = canary
+chaos_active 0  = no chaos
+chaos_active 1  = slow chaos
+chaos_active 2  = error chaos
+```
 
-Run:
+Test metrics:
 
-`./swiftdeploy validate`
+```bash
+curl -s http://localhost:8080/metrics
+```
 
-Validation checks include:
+Useful filtered output:
 
-- `manifest.yaml` exists
-- required manifest keys are present
-- Docker Compose and Nginx templates exist
-- generated files exist
-- Docker Engine is reachable
-- Docker Compose is available
-- application image exists locally
-- generated Docker Compose file is valid
-- Nginx includes the `X-Deployed-By: swiftdeploy` header
-- app service is internal-only
-- OPA sidecar exists
-- OPA is bound to localhost only
-- containers use security hardening
-- Nginx port is available or already used by this stack
-
----
-
-## Deploy the Stack
-
-Run:
-
-`./swiftdeploy deploy`
-
-The deploy command:
-
-1. Regenerates deployment files from the manifest.
-2. Starts the OPA sidecar.
-3. Sends host facts to OPA for the pre-deploy infrastructure policy check.
-4. Blocks deployment if OPA denies the action.
-5. Runs validation checks.
-6. Starts the full Docker Compose stack.
-7. Waits for the application health check to pass.
-
-The application becomes available at:
-
-`http://localhost:8080`
+```bash
+curl -s http://localhost:8080/metrics | grep -E "http_requests_total|app_uptime_seconds|app_mode|chaos_active"
+```
 
 ---
 
-## OPA Policy Enforcement
+## Open Policy Agent
 
-SwiftDeploy uses Open Policy Agent as the policy decision engine.
+OPA runs as a sidecar container.
 
-The CLI does not make allow or deny decisions by itself. It only collects facts and sends them to OPA.
+It is reachable by the CLI at:
 
-OPA returns structured decisions containing:
+```text
+http://localhost:8181
+```
 
-- `allow`
-- `domain`
-- `reason`
-- `violations`
+OPA is deliberately not exposed through Nginx.
 
-This ensures every blocked deployment or promotion includes a human-readable reason.
+OPA loads Rego files from:
+
+```text
+policies/
+```
+
+The CLI does not make allow/deny decisions by itself. It collects facts and sends them to OPA. OPA returns a structured decision.
+
+Example decision:
+
+```json
+{
+  "allow": false,
+  "domain": "infrastructure",
+  "reason": "Infrastructure policy blocked this action.",
+  "violations": [
+    "Disk free is below the required limit."
+  ]
+}
+```
 
 ---
 
 ## Policy Domains
 
-The project has two separate Rego policy domains.
+SwiftDeploy uses separate policy domains.
 
-### Infrastructure Policy
+### 1. Infrastructure Policy
 
 File:
 
-`policies/infrastructure.rego`
+```text
+policies/infrastructure.rego
+```
 
-Question owned by this policy:
+Question answered:
 
+```text
 Is the host safe enough for deployment?
+```
 
 It blocks deployment if:
 
-- disk free space is below 10GB
-- CPU load is above 2.0
+```text
+Disk free < 10GB
+CPU load > 2.0
+```
 
-The thresholds are stored in `manifest.yaml`, not hardcoded in the Rego file.
+The thresholds are stored in `manifest.yaml`, not hardcoded directly in Rego.
 
 ---
 
-### Canary Safety Policy
+### 2. Canary Safety Policy
 
 File:
 
-`policies/canary.rego`
+```text
+policies/canary.rego
+```
 
-Question owned by this policy:
+Question answered:
 
+```text
 Is the canary healthy enough to promote?
+```
 
 It blocks promotion if:
 
-- error rate is above 1%
-- P99 latency is above 500ms over the evaluation window
+```text
+Error rate > 1%
+P99 latency > 500ms
+```
 
-The CLI scrapes `/metrics`, calculates error rate and P99 latency, sends those values to OPA, and waits for OPA's decision.
-
----
-
-## Stable and Canary Promotion
-
-Promote to canary:
-
-`./swiftdeploy promote canary`
-
-Confirm canary mode:
-
-`curl -i http://localhost:8080/`
-
-Expected canary signal:
-
-`X-Mode: canary`
-
-Promote back to stable:
-
-`./swiftdeploy promote stable`
-
-In stable mode, the `X-Mode: canary` header should no longer appear.
-
----
-
-## Chaos Testing
-
-Chaos testing is used to prove that the canary safety policy works.
-
-To inject slow chaos:
-
-`curl -i -X POST http://localhost:8080/chaos -H "Content-Type: application/json" -d '{"mode":"slow","duration":2}'`
-
-Generate traffic:
-
-`for i in {1..20}; do curl -s http://localhost:8080/ > /dev/null; echo "slow request $i"; sleep 1; done`
-
-Attempt promotion while canary is unhealthy:
-
-`./swiftdeploy promote stable`
-
-Expected result:
-
-The canary policy should block promotion if P99 latency is above the allowed threshold.
-
-Recover from chaos:
-
-`curl -i -X POST http://localhost:8080/chaos -H "Content-Type: application/json" -d '{"mode":"recover"}'`
-
----
-
-## Status Dashboard
-
-Run:
-
-`./swiftdeploy status`
-
-Run once:
-
-`./swiftdeploy status --once`
-
-The status command shows:
-
-- current app mode
-- current chaos state
-- request rate
-- error rate
-- P99 latency
-- infrastructure policy compliance
-- canary policy compliance
-
-Every status scrape is appended to:
-
-`history.jsonl`
-
-This file acts as the audit trail.
-
----
-
-## Audit Report
-
-Generate the audit report:
-
-`./swiftdeploy audit`
-
-This creates:
-
-`audit_report.md`
-
-The audit report includes:
-
-- summary of samples analysed
-- timeline of mode changes
-- timeline of chaos state changes
-- policy violations
-
-The report is formatted as GitHub Flavored Markdown.
+Before promotion, SwiftDeploy scrapes `/metrics`, calculates the error rate and P99 latency, sends the values to OPA, and only promotes if OPA allows the action.
 
 ---
 
@@ -462,37 +433,230 @@ The report is formatted as GitHub Flavored Markdown.
 
 OPA must not be accessible through Nginx.
 
-Test Nginx path:
+Test through Nginx:
 
-`curl -i http://localhost:8080/v1/data/swiftdeploy/infrastructure/decision`
+```bash
+curl -i http://localhost:8080/v1/data/swiftdeploy/infrastructure/decision
+```
 
 Expected result:
 
-A normal application or Nginx response such as 404, not an OPA policy response.
+```text
+404 Not Found
+```
 
 Test OPA directly:
 
-`curl -i http://localhost:8181/health`
+```bash
+curl -i http://localhost:8181/health
+```
 
 Expected result:
 
-OPA health response.
+```text
+HTTP/1.1 200 OK
+{}
+```
 
-This proves OPA is reachable by the CLI but isolated from public ingress.
+This proves OPA is available to the CLI but not exposed through the public Nginx ingress.
 
 ---
 
-## Security Notes
+## Hard Gate Deployment Test
 
-SwiftDeploy includes the following security practices:
+To prove that deployment can be blocked, the infrastructure threshold can be temporarily raised in `manifest.yaml`.
 
-- app container is not publicly exposed
-- Nginx is the only public application entry point
-- OPA is bound to localhost only
-- containers drop Linux capabilities
-- containers use `no-new-privileges:true`
-- app runs inside an internal Docker network
-- Nginx adds the `X-Deployed-By: swiftdeploy` response header
+Example:
+
+```yaml
+policy:
+  infrastructure:
+    min_disk_free_gb: 9999
+```
+
+Then run:
+
+```bash
+./swiftdeploy deploy
+```
+
+Expected result:
+
+```text
+[POLICY BLOCK] deploy was blocked by infrastructure policy
+```
+
+After the test, restore the threshold:
+
+```yaml
+min_disk_free_gb: 10
+```
+
+This proves that `swiftdeploy deploy` is policy-gated.
+
+---
+
+## Canary Safety Test
+
+Promote to canary:
+
+```bash
+./swiftdeploy promote canary
+```
+
+Inject slow chaos:
+
+```bash
+curl -i -X POST http://localhost:8080/chaos \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"slow","duration":2}'
+```
+
+Generate traffic:
+
+```bash
+for i in {1..20}; do
+  curl -s http://localhost:8080/ > /dev/null
+  echo "slow request $i"
+  sleep 1
+done
+```
+
+Attempt promotion:
+
+```bash
+./swiftdeploy promote stable
+```
+
+Expected result:
+
+```text
+[POLICY BLOCK] promote stable was blocked by canary policy
+```
+
+Recover from chaos:
+
+```bash
+curl -i -X POST http://localhost:8080/chaos \
+  -H "Content-Type: application/json" \
+  -d '{"mode":"recover"}'
+```
+
+This proves that unhealthy canaries are not promoted blindly.
+
+---
+
+## Status Dashboard
+
+Run once:
+
+```bash
+./swiftdeploy status --once
+```
+
+Run continuously:
+
+```bash
+./swiftdeploy status
+```
+
+The status dashboard displays:
+
+```text
+current mode
+chaos state
+requests per second
+window requests
+window errors
+error rate
+P99 latency
+infrastructure policy status
+canary policy status
+```
+
+Every status scrape is appended to:
+
+```text
+history.jsonl
+```
+
+---
+
+## Audit Report
+
+Generate the audit report:
+
+```bash
+./swiftdeploy audit
+```
+
+This creates:
+
+```text
+audit_report.md
+```
+
+The report includes:
+
+```text
+summary
+timeline
+mode changes
+chaos state changes
+policy violations
+```
+
+This provides an audit trail for the deployment workflow.
+
+---
+
+# Quick Demo Commands
+
+Use these commands to demonstrate the project quickly:
+
+```bash
+./swiftdeploy validate
+./swiftdeploy deploy
+curl -i http://localhost:8080/healthz
+curl -i http://localhost:8080/
+curl -s http://localhost:8080/metrics | grep -E "http_requests_total|app_uptime_seconds|app_mode|chaos_active"
+curl -i http://localhost:8181/health
+curl -i http://localhost:8080/v1/data/swiftdeploy/infrastructure/decision
+./swiftdeploy promote canary
+curl -i http://localhost:8080/ | grep -E "HTTP|X-Mode|X-Deployed-By"
+./swiftdeploy status --once
+./swiftdeploy audit
+head -40 audit_report.md
+```
+
+---
+
+# 5-Minute Defence Summary
+
+SwiftDeploy is a manifest-driven DevOps automation tool that deploys a Flask/Gunicorn API behind Nginx using Docker Compose.
+
+In Stage 4A, I built the deployment engine. It reads `manifest.yaml`, generates Docker Compose and Nginx files, validates the environment, deploys the stack, supports stable/canary promotion, supports chaos testing, and can tear down the environment.
+
+In Stage 4B, I added observability, OPA policy enforcement, and auditing. The app exposes `/metrics`, the CLI scrapes those metrics, OPA makes policy decisions, and the tool blocks unsafe deploys or promotions. The `status` command shows live health and policy compliance, while the `audit` command generates a Markdown audit report.
+
+The key design principle is that SwiftDeploy does not deploy or promote blindly. It observes, asks OPA, explains the result, and records evidence.
+
+---
+
+## Security Decisions
+
+SwiftDeploy includes the following security choices:
+
+```text
+app service is internal-only
+Nginx is the only public application entry point
+OPA is bound to localhost only
+containers drop Linux capabilities
+containers use no-new-privileges
+the app runs as a non-root user
+```
+
+These choices reduce unnecessary exposure and make the deployment safer.
 
 ---
 
@@ -500,65 +664,101 @@ SwiftDeploy includes the following security practices:
 
 ### Docker Engine is not reachable
 
-Open Docker Desktop and wait until Docker Engine is running.
+Open Docker Desktop and confirm:
 
-Then run:
+```bash
+docker version
+```
 
-`docker version`
+### Script does not run with `./swiftdeploy`
 
-### Docker Compose is unavailable
+Use:
 
-Check:
+```bash
+python swiftdeploy --help
+```
 
-`docker compose version`
+or:
+
+```bash
+python swiftdeploy validate
+```
 
 ### Port 8080 is already in use
 
 Run:
 
-`./swiftdeploy teardown`
+```bash
+./swiftdeploy teardown
+```
 
-Or change the Nginx port in `manifest.yaml`.
+Then deploy again.
 
 ### OPA is unavailable
 
 Check:
 
-`curl -i http://localhost:8181/health`
+```bash
+curl -i http://localhost:8181/health
+```
 
-If OPA is not running, redeploy:
+If it fails, redeploy:
 
-`./swiftdeploy deploy`
-
-### CLI does not run with `./swiftdeploy`
-
-Use:
-
-`python swiftdeploy <command>`
-
-Example:
-
-`python swiftdeploy validate`
+```bash
+./swiftdeploy deploy
+```
 
 ---
 
-## Defence Summary
+## Lessons Learned
 
-SwiftDeploy demonstrates a practical DevOps workflow that combines deployment automation, observability, policy-as-code, and auditing.
+This project taught me that DevOps is not only about running containers.
 
-The project shows how to:
+A good deployment workflow should be:
 
-- use a manifest as the source of truth
-- generate infrastructure files from templates
-- deploy containers with Docker Compose
-- route traffic through Nginx
-- keep the application service private
-- expose Prometheus-style metrics
-- use OPA for deployment and promotion decisions
-- block unsafe actions with clear policy reasons
-- promote between stable and canary modes
-- inject controlled chaos
-- monitor service health and policy compliance
-- produce an audit report from operational history
+```text
+repeatable
+observable
+policy-driven
+secure
+auditable
+```
 
-The most important design principle is that SwiftDeploy does not deploy or promote blindly. It observes the environment, asks OPA for a policy decision, surfaces the reason to the operator, and records activity for audit purposes.
+The biggest lesson is:
+
+> Deploying is easy. Deploying safely is the real DevOps challenge.
+
+---
+
+## Possible Improvements
+
+Future improvements could include:
+
+```text
+Prometheus server integration
+Grafana dashboard
+GitHub Actions pipeline
+OPA unit tests
+structured JSON logs
+automatic rollback
+Slack notifications
+cloud deployment
+```
+
+---
+
+## Conclusion
+
+SwiftDeploy demonstrates deployment automation, reverse proxying, container security, observability, policy-as-code, canary safety, chaos testing, and audit reporting in one workflow.
+
+The final project does not only ask:
+
+```text
+Can I deploy?
+```
+
+It also asks:
+
+```text
+Is it safe to deploy?
+```
